@@ -3,6 +3,7 @@ package src.main.kotlin
 import mu.KotlinLogging
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.OpenCVFrameConverter
+import org.opencv.core.Core
 import org.opencv.core.MatOfRect
 import org.opencv.objdetect.CascadeClassifier
 
@@ -24,19 +25,28 @@ fun main() {
             grabber.start()
             while (true) {
                 val frame = grabber.grabImage() ?: break
-                val openCvMat = openCvConverter.convert(frame)!!
-                yield(org.opencv.core.Mat(openCvMat.address()))
+                val openCvCoreMat = openCvConverter.convert(frame)!!
+                val mat = org.opencv.core.Mat(openCvCoreMat.address())
+                yield(mat)
             }
             grabber.stop()
         }
     }
 
-    val face = CascadeClassifier("lib/opencv/sources/data/haarcascades/haarcascade_frontalface_alt.xml")
+    val face = CascadeClassifier("haarcascade_frontalface_alt_tree.xml")
     val faceDetections = MatOfRect()
 
     mats.forEachIndexed { idx, mat ->
+
         face.detectMultiScale(mat, faceDetections)
         val rects = faceDetections.toList().filterNotNull().toTypedArray()
-        println("Frame $idx detected ${rects.size} faces")
+
+        Core.rotate(mat, mat, Core.ROTATE_180)
+        face.detectMultiScale(mat, faceDetections)
+        val rects2 = faceDetections.toList().filterNotNull().toTypedArray()
+
+        if (rects.isNotEmpty() || rects2.isNotEmpty()) {
+            println("Frame $idx detected faces: ${rects.size} upside-up, ${rects2.size} upside-down.")
+        }
     }
 }
