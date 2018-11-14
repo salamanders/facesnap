@@ -1,7 +1,7 @@
-package src.main.kotlin
-
 import com.natpryce.konfig.*
 import org.bytedeco.javacpp.avutil
+import org.opencv.objdetect.CascadeClassifier
+import java.io.File
 
 class Conf {
     init {
@@ -18,5 +18,9 @@ class Conf {
 
     val inputFileName: String
         get() = config[inputFile]
+
+    fun getClassifiers(): Map<String, CascadeClassifier> = File("./classifiers/").walkTopDown().filter { it.isFile }
+            //.filter { it.name.endsWith("xml")}
+            .map { it.nameWithoutExtension to CascadeClassifier(it.absolutePath) }.toMap()
 
 }

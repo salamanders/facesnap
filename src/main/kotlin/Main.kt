@@ -1,11 +1,11 @@
-package src.main.kotlin
-
 import mu.KotlinLogging
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.OpenCVFrameConverter
 import org.opencv.core.Core
+import org.opencv.core.Mat
 import org.opencv.core.MatOfRect
-import org.opencv.objdetect.CascadeClassifier
+import org.opencv.imgproc.Imgproc
+import java.awt.Rectangle
 
 
 private val logger = KotlinLogging.logger {}
@@ -13,40 +13,76 @@ private val conf = Conf()
 
 
 fun main() {
-    println(System.getProperty("java.version"))
-    nu.pattern.OpenCV.loadShared() // from org.openpnp
+    nu.pattern.OpenCV.loadShared() // Required first by org.openpnp
     System.loadLibrary(org.opencv.core.Core.NATIVE_LIBRARY_NAME)
     logger.info { "Step 1: Video " }
 
-    val mats = sequence {
-        // val converter: FrameConverter<BufferedImage> = Java2DFrameConverter()
+    val allFrames = sequence<org.opencv.core.Mat> {
+        //
         val openCvConverter = OpenCVFrameConverter.ToMat()
         FFmpegFrameGrabber(conf.inputFileName).use { grabber ->
             grabber.start()
             while (true) {
                 val frame = grabber.grabImage() ?: break
-                val openCvCoreMat = openCvConverter.convert(frame)!!
-                val mat = org.opencv.core.Mat(openCvCoreMat.address())
-                yield(mat)
+                val copyOfFrame = frame.clone()!!
+                val openCvCoreMat = openCvConverter.convert(copyOfFrame)!!
+                yield(org.opencv.core.Mat(openCvCoreMat.address()))
             }
             grabber.stop()
         }
     }
+    val allClassifiers = conf.getClassifiers()
+    require(allClassifiers.isNotEmpty())
 
-    val face = CascadeClassifier("haarcascade_frontalface_alt_tree.xml")
-    val faceDetections = MatOfRect()
+    val detections = MatOfRect()
+    val grayFrame = Mat()
+    val grayRotatedFrame = Mat()
 
-    mats.forEachIndexed { idx, mat ->
+    val frameToClassifiersToLocations = mutableMapOf<Int, MutableMap<String, List<Rectangle>>>()
+    frameToClassifiersToLocations.readFromFile("locations")
+    if (frameToClassifiersToLocations.isNotEmpty()) {
+        println("Restored from cache: ${frameToClassifiersToLocations.size}")
+    }
 
-        face.detectMultiScale(mat, faceDetections)
-        val rects = faceDetections.toList().filterNotNull().toTypedArray()
+    allFrames.forEachIndexed { frameNumber, mat ->
+        if (frameToClassifiersToLocations.containsKey(frameNumber)) {
+            println("$frameNumber skipped (cached)")
+        } else {
 
-        Core.rotate(mat, mat, Core.ROTATE_180)
-        face.detectMultiScale(mat, faceDetections)
-        val rects2 = faceDetections.toList().filterNotNull().toTypedArray()
+            if ((frameNumber and (frameNumber - 1)) == 0) {
+                println("Read frame $frameNumber")
+                frameToClassifiersToLocations.saveToFile("locations")
+                System.gc()
+            }
 
-        if (rects.isNotEmpty() || rects2.isNotEmpty()) {
-            println("Frame $idx detected faces: ${rects.size} upside-up, ${rects2.size} upside-down.")
+            frameToClassifiersToLocations[frameNumber] = mutableMapOf()
+
+            Imgproc.cvtColor(mat, grayFrame, Imgproc.COLOR_BGR2GRAY)
+            Imgproc.equalizeHist(grayFrame, grayFrame)
+            Core.rotate(grayFrame, grayRotatedFrame, Core.ROTATE_180)
+
+            allClassifiers.forEach { detectorName, faceDetector ->
+                faceDetector.detectMultiScale(grayFrame, detections)
+                detections.toList().filterNotNull().map { cvRect ->
+                    java.awt.Rectangle(cvRect.x, cvRect.y, cvRect.width, cvRect.height)
+                }.let { rects ->
+                    if (rects.isNotEmpty()) {
+                        println("Frame $frameNumber $detectorName detected faces: ${rects.size} upside-up")
+                        frameToClassifiersToLocations[frameNumber]!![detectorName] = rects
+                    }
+                }
+
+                faceDetector.detectMultiScale(grayRotatedFrame, detections)
+                detections.toList().filterNotNull().map { cvRect ->
+                    java.awt.Rectangle(cvRect.x, cvRect.y, cvRect.width, cvRect.height)
+                }.let { rects ->
+                    if (rects.isNotEmpty()) {
+                        println("Frame $frameNumber $detectorName detected faces: ${rects.size} upside-down")
+                        frameToClassifiersToLocations[frameNumber]!![detectorName + "_180"] = rects
+                    }
+                }
+            }
         }
     }
+    frameToClassifiersToLocations.saveToFile("locations")
 }
