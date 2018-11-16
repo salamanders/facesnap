@@ -1,7 +1,9 @@
+import com.google.gson.GsonBuilder
+import java.awt.Graphics2D
 import java.awt.image.BufferedImage
 import java.io.File
-import java.io.ObjectInputStream
-import java.io.ObjectOutputStream
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
@@ -26,20 +28,25 @@ fun labelToFile(fileOrLabel: String): File {
     return File("$fileOrLabel$hash.ser.gz")
 }
 
-fun MutableMap<*, *>.saveToFile(label: String) {
-    ObjectOutputStream(GZIPOutputStream(labelToFile(label).outputStream())).use {
-        it.writeObject(this)
+
+internal val gson = GsonBuilder().setPrettyPrinting().create()!!
+
+fun <K, V> MutableMap<K, V>.saveToFile(label: String) {
+    val file = labelToFile(label)
+    OutputStreamWriter(GZIPOutputStream(file.outputStream())).use {
+        it.write(gson.toJson(this))
     }
+    println("Cached to file: ${file.name}")
 }
 
-fun MutableMap<*, *>.readFromFile(label: String) {
+fun <K, V> MutableMap<K, V>.readFromFile(label: String) {
     val file = labelToFile(label)
     if (file.canRead()) {
-        ObjectInputStream(GZIPInputStream(file.inputStream())).use {
+        InputStreamReader(GZIPInputStream(file.inputStream())).use {
+            val read = gson.fromJson(it.readText(), Map::class.java)
+            println("Read cached ${file.name} size:${read.size}...")
             @Suppress("UNCHECKED_CAST")
-            val read = it.readObject() as Map<Nothing, Nothing>
-            println("Read cached $label size:${read.size}...")
-            this.putAll(read)
+            this.putAll(read as Map<out K, V>)
         }
     }
 }
@@ -49,4 +56,15 @@ fun BufferedImage.deepCopy(): BufferedImage {
     val isAlphaPremultiplied = cm.isAlphaPremultiplied
     val raster = copyData(null)!!
     return BufferedImage(cm, raster, isAlphaPremultiplied, null)
+}
+
+
+fun BufferedImage.rotate90cw(): BufferedImage {
+    val rotatedImage = BufferedImage(height, width, type)
+    (rotatedImage.graphics as Graphics2D).let { g2d: Graphics2D ->
+        g2d.rotate(Math.toRadians(90.0))
+        g2d.drawImage(this, 0, -rotatedImage.width, null)
+        g2d.dispose()
+    }
+    return rotatedImage
 }

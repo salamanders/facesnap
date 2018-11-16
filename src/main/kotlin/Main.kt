@@ -1,88 +1,61 @@
 import mu.KotlinLogging
+import net.tzolov.cv.mtcnn.FaceAnnotation
+import net.tzolov.cv.mtcnn.MtcnnService
+import org.bytedeco.javacpp.avutil
+import org.bytedeco.javacv.FFmpegFrameFilter
 import org.bytedeco.javacv.FFmpegFrameGrabber
-import org.bytedeco.javacv.OpenCVFrameConverter
-import org.opencv.core.Core
-import org.opencv.core.Mat
-import org.opencv.core.MatOfRect
-import org.opencv.imgproc.Imgproc
-import java.awt.Rectangle
-
+import org.bytedeco.javacv.FrameConverter
+import org.bytedeco.javacv.Java2DFrameConverter
+import java.awt.image.BufferedImage
 
 private val logger = KotlinLogging.logger {}
 private val conf = Conf()
 
 
 fun main() {
-    nu.pattern.OpenCV.loadShared() // Required first by org.openpnp
-    System.loadLibrary(org.opencv.core.Core.NATIVE_LIBRARY_NAME)
+    //nu.pattern.OpenCV.loadShared() // Required first by org.openpnp
+    //System.loadLibrary(org.opencv.core.Core.NATIVE_LIBRARY_NAME)
+    avutil.av_log_set_level(avutil.AV_LOG_QUIET) // ffmpeg gets loud per frame otherwise
     logger.info { "Step 1: Video " }
 
-    val allFrames = sequence<org.opencv.core.Mat> {
-        //
-        val openCvConverter = OpenCVFrameConverter.ToMat()
+    val allFrames = sequence {
+        println("Reading all frames from ${conf.inputFileName}")
+        val converter: FrameConverter<BufferedImage> = Java2DFrameConverter()
         FFmpegFrameGrabber(conf.inputFileName).use { grabber ->
             grabber.start()
+
+            val filter = FFmpegFrameFilter("scale=640:-1", grabber.imageWidth, grabber.imageHeight)
+            filter.pixelFormat = grabber.pixelFormat
+            filter.start()
             while (true) {
-                val frame = grabber.grabImage() ?: break
-                val copyOfFrame = frame.clone()!!
-                val openCvCoreMat = openCvConverter.convert(copyOfFrame)!!
-                yield(org.opencv.core.Mat(openCvCoreMat.address()))
+                filter.push(grabber.grabImage() ?: break)
+                yield(converter.convert(filter.pull()).deepCopy())
             }
             grabber.stop()
         }
-    }
-    val allClassifiers = conf.getClassifiers()
-    require(allClassifiers.isNotEmpty())
-
-    val detections = MatOfRect()
-    val grayFrame = Mat()
-    val grayRotatedFrame = Mat()
-
-    val frameToClassifiersToLocations = mutableMapOf<Int, MutableMap<String, List<Rectangle>>>()
-    frameToClassifiersToLocations.readFromFile("locations")
-    if (frameToClassifiersToLocations.isNotEmpty()) {
-        println("Restored from cache: ${frameToClassifiersToLocations.size}")
+        println("Finished all frames!")
     }
 
-    allFrames.forEachIndexed { frameNumber, mat ->
-        if (frameToClassifiersToLocations.containsKey(frameNumber)) {
-            println("$frameNumber skipped (cached)")
-        } else {
+    val mtcnnService = MtcnnService(30, 0.709, doubleArrayOf(0.6, 0.7, 0.7))
 
-            if ((frameNumber and (frameNumber - 1)) == 0) {
-                println("Read frame $frameNumber")
-                frameToClassifiersToLocations.saveToFile("locations")
-                System.gc()
-            }
+    val frameRotationToAnnotations = mutableMapOf<Pair<Int, Int>, List<FaceAnnotation>>()
+    frameRotationToAnnotations.readFromFile("annotations")
+    if (frameRotationToAnnotations.isNotEmpty()) {
+        println("Restored from cache: ${frameRotationToAnnotations.size}")
+    }
 
-            frameToClassifiersToLocations[frameNumber] = mutableMapOf()
+    allFrames.forEachIndexed { frameNumber, image ->
+        if ((frameNumber and (frameNumber - 1)) == 0) {
+            println("Read frame $frameNumber")
+            frameRotationToAnnotations.saveToFile("annotations")
+        }
 
-            Imgproc.cvtColor(mat, grayFrame, Imgproc.COLOR_BGR2GRAY)
-            Imgproc.equalizeHist(grayFrame, grayFrame)
-            Core.rotate(grayFrame, grayRotatedFrame, Core.ROTATE_180)
-
-            allClassifiers.forEach { detectorName, faceDetector ->
-                faceDetector.detectMultiScale(grayFrame, detections)
-                detections.toList().filterNotNull().map { cvRect ->
-                    java.awt.Rectangle(cvRect.x, cvRect.y, cvRect.width, cvRect.height)
-                }.let { rects ->
-                    if (rects.isNotEmpty()) {
-                        println("Frame $frameNumber $detectorName detected faces: ${rects.size} upside-up")
-                        frameToClassifiersToLocations[frameNumber]!![detectorName] = rects
-                    }
-                }
-
-                faceDetector.detectMultiScale(grayRotatedFrame, detections)
-                detections.toList().filterNotNull().map { cvRect ->
-                    java.awt.Rectangle(cvRect.x, cvRect.y, cvRect.width, cvRect.height)
-                }.let { rects ->
-                    if (rects.isNotEmpty()) {
-                        println("Frame $frameNumber $detectorName detected faces: ${rects.size} upside-down")
-                        frameToClassifiersToLocations[frameNumber]!![detectorName + "_180"] = rects
-                    }
-                }
-            }
+        var rotatedImage = image
+        (0..270 step 90).forEach { degreesRotated ->
+            rotatedImage = if (degreesRotated == 0) rotatedImage else rotatedImage.rotate90cw()
+            val faces = mtcnnService.faceDetection(rotatedImage)!!.toList().filterNotNull()
+            frameRotationToAnnotations[Pair(frameNumber, degreesRotated)] = faces
+            println("Frame $frameNumber Rotation $degreesRotated faces: ${faces.size}")
         }
     }
-    frameToClassifiersToLocations.saveToFile("locations")
 }
